@@ -9,6 +9,7 @@ import { SwitchCreator } from './switch';
 import { StatelessProgrammableSwitchCreator } from './action';
 import { ThermostatCreator } from './climate';
 import { AirQualitySensorCreator } from './air_quality';
+import { GarageDoorOpenerCreator } from './garage_door';
 
 export interface ServiceCreatorManager {
   createHomeKitEntitiesFromExposes(accessory: BasicAccessory, exposes: ExposesEntry[]): void;
@@ -29,6 +30,7 @@ export class BasicServiceCreatorManager implements ServiceCreatorManager {
     StatelessProgrammableSwitchCreator,
     ThermostatCreator,
     BatteryCreator,
+    GarageDoorOpenerCreator,
   ];
 
   private static instance: BasicServiceCreatorManager;
