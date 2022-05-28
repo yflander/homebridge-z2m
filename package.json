@@ -45,7 +45,8 @@
     "check-release": "release-it --dry-run -VV",
     "release": "release-it",
     "check-pre-release": "release-it --dry-run -VV --npm.tag=next",
-    "pre-release": "release-it --npm.tag=next"
+    "pre-release": "release-it --npm.tag=next",
+    "deploy": "rsync -a --delete ./dist/ /usr/local/lib/node_modules/homebridge-z2m/dist/"
   },
   "keywords": [
     "homebridge-plugin",
