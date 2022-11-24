@@ -6,6 +6,48 @@ Since version 1.0.0, we try to follow the [Semantic Versioning](https://semver.o
 
 ## [Unreleased]
 
+### Added
+
+- Properties/exposes information can now be excluded based on the `endpoint`, using the `excluded_endpoints` configuration option. (relates to [#517](https://github.com/itavero/homebridge-z2m/issues/517))
+- Window Covering can now be requested to stop moving (see [#483](https://github.com/itavero/homebridge-z2m/issues/483))
+- Availability information from Zigbee2MQTT, if available, is now used to determine if a device is reachable or not. (see [#36](https://github.com/itavero/homebridge-z2m/issues/36))
+
+### Changed
+
+- Exposes information is now filtered before passing it to the service handlers. This should make the behavior more consistent and reduce complexity of the service handlers for improved maintainability.
+- MQTT messages being published by this plugin are now logged to the `debug` log level by default. This can be changed by setting `log.mqtt_publish` to the desired log level (e.g. `info`) in the plugin configuration. (see [#518](https://github.com/itavero/homebridge-z2m/issues/518))
+
+### Fixed
+
+- When combining exposes information of grouped devices, the `value_min` and `value_max` were not being combined correctly. This has been fixed, so that the resulting range is supported by all devices in the group.
+
+## [1.9.2] - 2022-10-01
+
+### Fixed
+
+- Fixed a bug introduced in [1.9.1] that caused several types of devices to stop working, due to a coding error. (see [#535](https://github.com/itavero/homebridge-z2m/issues/535) for more details)
+
+## [1.9.1] - 2022-10-01
+
+### Fixed
+
+- Added additional checks to prevent certain errors from occuring during creation of a service handler. (see [#443](https://github.com/itavero/homebridge-z2m/issues/443))
+- Removed some default values from `config.schema.json` to prevent certain illegal configurations from being created by accident.
+
+## [1.9.0] - 2022-06-29
+
+### Added
+
+- Some converters now have some additional configuration options which allows you to select an alternative implementation. (see
+ [#458](https://github.com/itavero/homebridge-z2m/pull/458) and related issues)
+  - `switch` can be configured as a `switch` (default) or `outlet`
+  - `occupancy` can be configured as `occupancy` (default) or `motion`
+- `device_temperature` is now exposed as a temperature sensor. Due to a [change in Zigbee2MQTT](https://github.com/Koenkk/zigbee-herdsman-converters/pull/4267), you might need to update your Homebridge configuration to exclude `device_temperature` if you previously excluded `temperature` for some devices. (see [#456](https://github.com/itavero/homebridge-z2m/issues/456))
+
+### Changed
+
+- Refactored `basic_sensor.ts` as the file was getting way too huge. This should not change any behavior.
+
 ## [1.8.0] - 2022-05-09
 
 ### Added
@@ -180,7 +222,7 @@ For `cover` devices the following changes/fixes are in this release:
 ## [1.1.0-beta.1][] - 2021-01-16
 ### Changed
 - Zigbee2MQTT minimal version check ignores the `-dev` suffix, so that the newer development build is also accepted.
-- Updated Name characteristic of the Accessory Information service with the `friendly_name` received from Zigbee2MQTT. 
+- Updated Name characteristic of the Accessory Information service with the `friendly_name` received from Zigbee2MQTT.
 - Fixed some typo's, both in code and documentation.
 - Changed casing of Zigbee2MQTT in logs and such.
 
@@ -313,7 +355,10 @@ For `cover` devices the following changes/fixes are in this release:
 - Improve state determination for WindowCovering.
 
 
-[unreleased]: https://github.com/itavero/homebridge-z2m/compare/v1.8.0...HEAD
+[unreleased]: https://github.com/itavero/homebridge-z2m/compare/v1.9.2...HEAD
+[1.9.2]: https://github.com/itavero/homebridge-z2m/compare/v1.9.1...v1.9.2
+[1.9.1]: https://github.com/itavero/homebridge-z2m/compare/v1.9.0...v1.9.1
+[1.9.0]: https://github.com/itavero/homebridge-z2m/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/itavero/homebridge-z2m/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/itavero/homebridge-z2m/compare/v1.7.0-rc.1...v1.7.0
 [1.7.0-rc.1]: https://github.com/itavero/homebridge-z2m/compare/v1.6.2...v1.7.0-rc.1

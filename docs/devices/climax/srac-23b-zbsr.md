@@ -23,6 +23,8 @@ the Climax SRAC-23B-ZBSR
 
 ## Exposes
 
+This is the information provided by Zigbee2MQTT for this device:
+
 ```json
 [
   {
@@ -133,7 +135,7 @@ the Climax SRAC-23B-ZBSR
     "name": "alarm",
     "property": "alarm",
     "access": 2,
-    "value_on": "ON",
+    "value_on": "START",
     "value_off": "OFF",
     "description": "Manual start of siren"
   },

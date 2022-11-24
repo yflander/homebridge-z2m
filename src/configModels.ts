@@ -1,23 +1,68 @@
-import { PlatformConfig, Logger } from 'homebridge';
+import { LogLevel, PlatformConfig } from 'homebridge';
+import { ConverterConfigValidatorCollection } from './converters/creators';
+import { BasicLogger } from './logger';
 import { ExposesEntry, isExposesEntry } from './z2mModels';
 
 export interface PluginConfiguration extends PlatformConfig {
   mqtt: MqttConfiguration;
+  log?: LogConfiguration;
   defaults?: BaseDeviceConfiguration;
   experimental?: string[];
   devices?: DeviceConfiguration[];
   exclude_grouped_devices?: boolean;
 }
 
-export const isPluginConfiguration = (x: PlatformConfig, logger: Logger | undefined = undefined): x is PluginConfiguration => {
+function hasValidConverterConfigurations(
+  config: BaseDeviceConfiguration,
+  converterConfigValidator: ConverterConfigValidatorCollection,
+  logger: BasicLogger | undefined
+): boolean {
+  return config.converters === undefined || converterConfigValidator.allConverterConfigurationsAreValid(config.converters, logger);
+}
+
+function hasValidDeviceConfigurations(
+  devices: unknown,
+  converterConfigValidator: ConverterConfigValidatorCollection,
+  logger: BasicLogger | undefined
+): boolean {
+  if (devices !== undefined) {
+    if (!Array.isArray(devices)) {
+      logger?.error('Incorrect configuration: devices must be an array');
+      return false;
+    }
+    for (const element of devices) {
+      if (!isDeviceConfiguration(element) || !hasValidConverterConfigurations(element, converterConfigValidator, logger)) {
+        logger?.error('Incorrect configuration: Entry for device is not correct: ' + JSON.stringify(element));
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+export const isPluginConfiguration = (
+  x: PlatformConfig,
+  converterConfigValidator: ConverterConfigValidatorCollection,
+  logger: BasicLogger | undefined = undefined
+): x is PluginConfiguration => {
   if (x.mqtt === undefined || !isMqttConfiguration(x.mqtt)) {
     logger?.error('Incorrect configuration: mqtt does not contain required fields');
     return false;
   }
 
-  if (x.defaults !== undefined && !isBaseDeviceConfiguration(x.defaults)) {
-    logger?.error('Incorrect configuration: Device defaults are incorrect: ' + JSON.stringify(x.defaults));
-    return false;
+  if (x.log !== undefined && !isLogConfiguration(x.log)) {
+    logger?.error('Incorrect configuration: log configuration is invalid: ' + JSON.stringify(x.log));
+  }
+
+  if (x.defaults !== undefined) {
+    if (!isBaseDeviceConfiguration(x.defaults)) {
+      logger?.error('Incorrect configuration: Device defaults are incorrect: ' + JSON.stringify(x.defaults));
+      return false;
+    }
+    if (!hasValidConverterConfigurations(x.defaults, converterConfigValidator, logger)) {
+      logger?.error('Incorrect configuration: Invalid converter configuration in device defaults.');
+      return false;
+    }
   }
 
   if (x.experimental !== undefined && !isStringArray(x.experimental)) {
@@ -30,21 +75,18 @@ export const isPluginConfiguration = (x: PlatformConfig, logger: Logger | undefi
     return false;
   }
 
-  if (x.devices !== undefined) {
-    if (!Array.isArray(x.devices)) {
-      logger?.error('Incorrect configuration: devices must be an array');
-      return false;
-    }
-    for (const element of x.devices) {
-      if (!isDeviceConfiguration(element)) {
-        logger?.error('Incorrect configuration: Entry for device is not correct: ' + JSON.stringify(element));
-        return false;
-      }
-    }
-  }
-  return true;
+  return hasValidDeviceConfigurations(x.devices, converterConfigValidator, logger);
 };
 
+export interface LogConfiguration extends Record<string, unknown> {
+  mqtt_publish?: string;
+}
+
+const allowedLogLevels = [LogLevel.DEBUG, LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR];
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const isLogConfiguration = (x: any): x is LogConfiguration =>
+  !(x.mqtt_publish !== undefined && typeof x.mqtt_publish !== 'string' && !allowedLogLevels.includes(x.mqtt_publish));
 export interface MqttConfiguration extends Record<string, unknown> {
   base_topic: string;
   server: string;
@@ -60,19 +102,22 @@ export interface MqttConfiguration extends Record<string, unknown> {
   disable_qos?: boolean;
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const isMqttConfiguration = (x: any): x is MqttConfiguration => (
-  x.base_topic !== undefined
-  && typeof x.base_topic === 'string'
-  && x.base_topic.length > 0
-  && x.server !== undefined
-  && typeof x.server === 'string'
-  && x.server.length > 0);
+export const isMqttConfiguration = (x: any): x is MqttConfiguration =>
+  x.base_topic !== undefined &&
+  typeof x.base_topic === 'string' &&
+  x.base_topic.length > 0 &&
+  x.server !== undefined &&
+  typeof x.server === 'string' &&
+  x.server.length > 0;
 
 export interface BaseDeviceConfiguration extends Record<string, unknown> {
   exclude?: boolean;
   excluded_keys?: string[];
+  excluded_endpoints?: string[];
   values?: PropertyValueConfiguration[];
+  converters?: object;
   experimental?: string[];
+  ignore_availability?: boolean;
 }
 
 export interface DeviceConfiguration extends BaseDeviceConfiguration {
@@ -82,19 +127,34 @@ export interface DeviceConfiguration extends BaseDeviceConfiguration {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const hasOptionalStringArrays = (object: any, ...properties: string[]): boolean => {
+  // Check if properties exist and are string arrays
+  for (const property of properties) {
+    if (property in object && object[property] !== undefined && !isStringArray(object[property])) {
+      return false;
+    }
+  }
+  return true;
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const isBaseDeviceConfiguration = (x: any): x is BaseDeviceConfiguration => {
   // Optional boolean exclude property
   if (x.exclude !== undefined && typeof x.exclude !== 'boolean') {
     return false;
   }
-
-  // Optional excluded_keys which must be an array of strings if present
-  if (x.excluded_keys !== undefined && !isStringArray(x.excluded_keys)) {
+  // Optional boolean ignore_availability property
+  if (x.ignore_availability !== undefined && typeof x.ignore_availability !== 'boolean') {
     return false;
   }
 
-  // Optional 'experimental' which must be an array of strings if present
-  if (x.experimental !== undefined && !isStringArray(x.experimental)) {
+  // Optional string arrays
+  if (!hasOptionalStringArrays(x, 'excluded_keys', 'excluded_endpoints', 'experimental')) {
+    return false;
+  }
+
+  // Optional 'converters' must be an object if present
+  if (x.converters !== undefined && typeof x.converters !== 'object') {
     return false;
   }
 
@@ -158,10 +218,7 @@ export const isPropertyValueConfiguration = (x: any): x is PropertyValueConfigur
   }
 
   // Optional exclude property
-  if (x.exclude !== undefined && !isStringArray(x.exclude)) {
-    return false;
-  }
-  return true;
+  return x.exclude === undefined || isStringArray(x.exclude);
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

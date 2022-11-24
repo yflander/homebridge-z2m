@@ -1,19 +1,30 @@
-import { API, DynamicPlatformPlugin, Logger, PlatformAccessory, PlatformConfig } from 'homebridge';
+import { API, DynamicPlatformPlugin, Logger, LogLevel, PlatformAccessory, PlatformConfig } from 'homebridge';
 
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 import { Zigbee2mqttAccessory } from './platformAccessory';
 import {
-  BaseDeviceConfiguration, DeviceConfiguration, isDeviceConfiguration, isPluginConfiguration,
+  BaseDeviceConfiguration,
+  DeviceConfiguration,
+  isDeviceConfiguration,
+  isPluginConfiguration,
   PluginConfiguration,
 } from './configModels';
 
 import * as mqtt from 'mqtt';
 import * as fs from 'fs';
 import {
-  DeviceListEntry, DeviceListEntryForGroup, ExposesEntry, exposesGetOverlap, GroupListEntry, isDeviceListEntry, isDeviceListEntryForGroup,
+  DeviceListEntry,
+  DeviceListEntryForGroup,
+  ExposesEntry,
+  exposesGetOverlap,
+  GroupListEntry,
+  isDeviceListEntry,
+  isDeviceListEntryForGroup,
 } from './z2mModels';
 import * as semver from 'semver';
-import { errorToString } from './helpers';
+import { errorToString, getDiffFromArrays } from './helpers';
+import { BasicServiceCreatorManager } from './converters/creators';
+import { getAvailabilityConfigurationForDevices, isAvailabilityEnabledGlobally } from './configHelpers';
 
 export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
   public readonly config?: PluginConfiguration;
@@ -21,33 +32,37 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
   private readonly mqttClient?: mqtt.MqttClient;
   private static readonly MIN_Z2M_VERSION = '1.17.0';
   private static readonly TOPIC_BRIDGE = 'bridge/';
+  private static readonly TOPIC_SUFFIX_AVAILABILITY = '/availability';
 
   // this is used to track restored cached accessories
   private readonly accessories: Zigbee2mqttAccessory[] = [];
   private didReceiveDevices: boolean;
   private lastReceivedZigbee2MqttVersion: string | undefined;
+  private lastZigbee2MqttState: string | undefined;
 
   private lastReceivedDevices: DeviceListEntry[] = [];
   private lastReceivedGroups: GroupListEntry[] = [];
   private groupUpdatePending = false;
   private deviceUpdatePending = false;
 
-  constructor(
-    public readonly log: Logger,
-    config: PlatformConfig,
-    public readonly api: API,
-  ) {
+  // Availability metadata
+  private zigbee2MqttHasBeenOffline = false;
+  private connectionPreviouslyClosed = false;
+  private availabilityIsEnabledGlobally = false;
+  private availabilityEnabledDevices = new Array<string>();
+  private availabilityDisabledDevices = new Array<string>();
+
+  constructor(public readonly log: Logger, config: PlatformConfig, public readonly api: API) {
     // Prepare internal states, variables and such
     this.onMessage = this.onMessage.bind(this);
     this.didReceiveDevices = false;
     this.lastReceivedZigbee2MqttVersion = undefined;
 
     // Set device defaults
-    this.baseDeviceConfig = {
-    };
+    this.baseDeviceConfig = {};
 
     // Validate configuration
-    if (isPluginConfiguration(config, log)) {
+    if (isPluginConfiguration(config, BasicServiceCreatorManager.getInstance(), log)) {
       this.config = config;
     } else {
       log.error(`INVALID CONFIGURATION FOR PLUGIN: ${PLUGIN_NAME}\nThis plugin will NOT WORK until this problem is resolved.`);
@@ -56,7 +71,6 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
 
     // Use configuration
     if (this.config !== undefined) {
-
       // Normalize experimental feature flags
       if (this.config.experimental !== undefined) {
         this.config.experimental = this.config.experimental.map((feature: string) => feature.trim().toLocaleUpperCase());
@@ -89,15 +103,8 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
     const options: mqtt.IClientOptions = Zigbee2mqttPlatform.createMqttOptions(this.log, config);
 
     const mqttClient = mqtt.connect(config.mqtt.server, options);
-    mqttClient.on('connect', () => {
-      this.log.info('Connected to MQTT server');
-      setTimeout(() => {
-        if (!this.didReceiveDevices) {
-          this.log.error('DID NOT RECEIVE ANY DEVICES AFTER BEING CONNECTED FOR TWO MINUTES.\n'
-            + `Please verify that Zigbee2MQTT is running and that it is v${Zigbee2mqttPlatform.MIN_Z2M_VERSION} or newer.`);
-        }
-      }, 120000);
-    });
+    mqttClient.on('connect', this.onMqttConnected.bind(this));
+    mqttClient.on('close', this.onMqttClose.bind(this));
 
     this.api.on('didFinishLaunching', () => {
       if (this.config !== undefined) {
@@ -158,24 +165,50 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
     return options;
   }
 
-  private checkZigbee2MqttVersion(version: string, topic: string) {
-    if (version !== this.lastReceivedZigbee2MqttVersion) {
-      // Only log the version if it is different from what we have previously received.
-      this.lastReceivedZigbee2MqttVersion = version;
-      this.log.info(`Using Zigbee2MQTT v${version} (identified via ${topic})`);
-    }
-
-    // Ignore -dev suffix if present, because Zigbee2MQTT appends this to the latest released version
-    // for the future development build (instead of applying semantic versioning).
-    const strippedVersion = version.replace(/-dev$/, '');
-
-    if (semver.lt(strippedVersion, Zigbee2mqttPlatform.MIN_Z2M_VERSION)) {
-      this.log.error('!!! UPDATE OF ZIGBEE2MQTT REQUIRED !!! \n' +
-        `Zigbee2MQTT v${version} is TOO OLD. The minimum required version is v${Zigbee2mqttPlatform.MIN_Z2M_VERSION}. \n` +
-        `This means that ${PLUGIN_NAME} MIGHT NOT WORK AS EXPECTED!`);
+  private updateServerAvailabilityForAllDevices(isOnline: boolean) {
+    for (const accessory of this.accessories) {
+      accessory.informOnZigbee2MqttOnlineStateChange(isOnline);
     }
   }
 
+  private onMqttConnected(): void {
+    this.log.info('Connected to MQTT server');
+    if (this.connectionPreviouslyClosed) {
+      if (this.lastZigbee2MqttState !== 'offline') {
+        this.log.debug('Update availability for all devices now that MQTT connection is recovered.');
+        this.updateServerAvailabilityForAllDevices(true);
+      } else {
+        this.log.debug('MQTT connection recovered, but last Zigbee2MQTT state was offline. Not updating availability.');
+      }
+    }
+    this.connectionPreviouslyClosed = false;
+
+    if (!this.didReceiveDevices) {
+      setTimeout(() => {
+        if (!this.didReceiveDevices) {
+          this.log.error(
+            'DID NOT RECEIVE ANY DEVICES AFTER BEING CONNECTED FOR TWO MINUTES.\n' +
+              `Please verify that Zigbee2MQTT is running and that it is v${Zigbee2mqttPlatform.MIN_Z2M_VERSION} or newer.`
+          );
+        }
+      }, 120000);
+    }
+  }
+
+  private onMqttClose(): void {
+    // Only handle the first time a connection is lost.
+    if (this.connectionPreviouslyClosed) {
+      return;
+    }
+    this.connectionPreviouslyClosed = true;
+
+    this.log.error('Disconnected from MQTT server!');
+
+    // Mark all accessories as offline
+    this.updateServerAvailabilityForAllDevices(false);
+  }
+
+  // eslint-disable-next-line sonarjs/cognitive-complexity
   private onMessage(topic: string, payload: Buffer) {
     const fullTopic = topic;
     try {
@@ -223,32 +256,26 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
           }
         } else if (topic === 'state') {
           const state = payload.toString();
-          if (state === 'offline') {
-            this.log.error('Zigbee2MQTT is OFFLINE!');
-            // TODO Mark accessories as offline somehow.
+          if (state !== this.lastZigbee2MqttState) {
+            this.lastZigbee2MqttState = state;
+            const isOnline = state !== 'offline';
+            if (!isOnline) {
+              this.log.error('Zigbee2MQTT is OFFLINE!');
+              this.zigbee2MqttHasBeenOffline = true;
+            } else {
+              this.log.info('Zigbee2MQTT is ONLINE');
+            }
+            // Only update if Zigbee2MQTT has been offline while Homebridge was active.
+            if (this.zigbee2MqttHasBeenOffline) {
+              this.updateServerAvailabilityForAllDevices(isOnline);
+            }
           }
         } else if (topic === 'info' || topic === 'config') {
           // New topic (bridge/info) and legacy topic (bridge/config) should both contain the version number.
-          const info = JSON.parse(payload.toString());
-          if ('version' in info) {
-            this.checkZigbee2MqttVersion(info['version'], fullTopic);
-          } else {
-            this.log.error(`No version found in message on '${fullTopic}'.`);
-          }
-
-          // Also check for potentially incorrect configurations:
-          if ('config' in info) {
-            const outputFormat = info.config.experimental?.output;
-            if (outputFormat !== undefined) {
-              if (!outputFormat.includes('json')) {
-                this.log.error('Zigbee2MQTT MUST output JSON in order for this plugin to work correctly. ' +
-                  `Currently 'experimental.output' is set to '${outputFormat}'. Please adjust your configuration.`);
-              } else {
-                this.log.debug(`Zigbee2MQTT 'experimental.output' is set to '${outputFormat}'`);
-              }
-            }
-          }
+          this.checkZigbee2MqttVersionAndConfig(payload.toString(), fullTopic);
         }
+      } else if (topic.endsWith(Zigbee2mqttPlatform.TOPIC_SUFFIX_AVAILABILITY)) {
+        this.handleDeviceAvailability(topic, payload.toString());
       } else if (!topic.endsWith('/get') && !topic.endsWith('/set')) {
         // Probably a status update from a device
         this.handleDeviceUpdate(topic, payload.toString());
@@ -266,6 +293,122 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
     } catch (Error) {
       this.log.error(`Failed to process MQTT message on '${fullTopic}'. (Maybe check the MQTT version?)`);
       this.log.error(errorToString(Error));
+    }
+  }
+
+  // eslint-disable-next-line sonarjs/cognitive-complexity
+  private checkZigbee2MqttVersionAndConfig(payload: string, fullTopic: string) {
+    const info = JSON.parse(payload);
+    if ('version' in info) {
+      if (info.version !== this.lastReceivedZigbee2MqttVersion) {
+        // Only log the version if it is different from what we have previously received.
+        this.lastReceivedZigbee2MqttVersion = info.version;
+        this.log.info(`Using Zigbee2MQTT v${info.version} (identified via ${fullTopic})`);
+      }
+
+      // Ignore -dev suffix if present, because Zigbee2MQTT appends this to the latest released version
+      // for the future development build (instead of applying semantic versioning).
+      const strippedVersion = info.version.replace(/-dev$/, '');
+
+      if (semver.lt(strippedVersion, Zigbee2mqttPlatform.MIN_Z2M_VERSION)) {
+        this.log.error(
+          '!!!UPDATE OF ZIGBEE2MQTT REQUIRED!!! \n' +
+            `Zigbee2MQTT v${info.version} is TOO OLD. The minimum required version is v${Zigbee2mqttPlatform.MIN_Z2M_VERSION}. \n` +
+            `This means that ${PLUGIN_NAME} MIGHT NOT WORK AS EXPECTED!`
+        );
+      }
+    } else {
+      this.log.error(`No version found in message on '${fullTopic}'.`);
+    }
+
+    // Also check for potentially incorrect configurations:
+    if ('config' in info) {
+      const outputFormat = info.config.experimental?.output;
+      if (outputFormat !== undefined) {
+        if (!outputFormat.includes('json')) {
+          this.log.error(
+            'Zigbee2MQTT MUST output JSON in order for this plugin to work correctly. ' +
+              `Currently 'experimental.output' is set to '${outputFormat}'. Please adjust your configuration.`
+          );
+        } else {
+          this.log.debug(`Zigbee2MQTT 'experimental.output' is set to '${outputFormat}'`);
+        }
+      }
+
+      // Check availability configuration
+      this.processAvailabilityConfig(info);
+    }
+  }
+
+  private processAvailabilityConfig(config) {
+    const currentAvailabilityConfig = this.availabilityIsEnabledGlobally;
+    this.availabilityIsEnabledGlobally = isAvailabilityEnabledGlobally(config);
+    this.log.debug(`Zigbee2MQTT availability feature is enabled globally: '${this.availabilityIsEnabledGlobally}'`);
+
+    // Check device configurations
+    const devices = getAvailabilityConfigurationForDevices(config, this.log);
+
+    // Find changes in availability configuration
+    const changedDevices = [
+      ...new Set([
+        ...getDiffFromArrays<string>(this.availabilityEnabledDevices, devices.enabled),
+        ...getDiffFromArrays<string>(this.availabilityDisabledDevices, devices.disabled),
+      ]),
+    ];
+
+    // Copy new values
+    this.availabilityEnabledDevices = devices.enabled;
+    this.availabilityDisabledDevices = devices.disabled;
+
+    // Update the necessary devices
+    if (this.availabilityIsEnabledGlobally !== currentAvailabilityConfig) {
+      // Update availability for all devices
+      this.log.debug(`Availability configuration changed from ${currentAvailabilityConfig} to ${this.availabilityIsEnabledGlobally}`);
+      for (const accessory of this.accessories) {
+        accessory.setAvailabilityEnabled(this.isAvailabilityEnabledForAddress(accessory));
+      }
+    } else {
+      // Only update changed devices
+      for (const identifier of changedDevices) {
+        const accessory = this.accessories.find((acc) => acc.matchesIdentifier(identifier));
+        accessory?.setAvailabilityEnabled(this.isAvailabilityEnabledForAddress(accessory));
+      }
+    }
+  }
+
+  private isAvailabilityEnabledForAddress(device: Zigbee2mqttAccessory): boolean {
+    if (this.availabilityEnabledDevices.findIndex((d) => device.matchesIdentifier(d)) >= 0) {
+      return true;
+    }
+    if (this.availabilityDisabledDevices.findIndex((d) => device.matchesIdentifier(d)) >= 0) {
+      return false;
+    }
+    return this.availabilityIsEnabledGlobally;
+  }
+
+  private async handleDeviceAvailability(topic: string, statePayload: string) {
+    // Check if payload is a JSON object or a plain string
+    let isAvailable = statePayload === 'online';
+    try {
+      const state = JSON.parse(statePayload).availability;
+      if ('state' in state) {
+        isAvailable = state.state === 'online';
+      }
+    } catch (error) {
+      // Ignore error as the string payload version is handled above
+    }
+    const deviceTopic = topic.slice(0, -1 * Zigbee2mqttPlatform.TOPIC_SUFFIX_AVAILABILITY.length);
+    const accessory = this.accessories.find((acc) => acc.matchesIdentifier(deviceTopic));
+    if (accessory) {
+      try {
+        accessory.updateAvailability(isAvailable);
+        this.log.debug(`Handled device availability update for ${deviceTopic}: ${statePayload}`);
+      } catch (Error) {
+        this.log.error(`Failed to process availability update with payload: ${statePayload}`);
+        this.log.error(errorToString(Error));
+      }
+    } else {
+      this.log.debug(`Unhandled message on topic: ${topic}`);
     }
   }
 
@@ -296,7 +439,7 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
     for (let i = this.accessories.length - 1; i >= 0; --i) {
       const foundIndex = this.lastReceivedDevices.findIndex((d) => d.ieee_address === this.accessories[i].ieeeAddress);
       const foundGroupIndex = this.lastReceivedGroups.findIndex((g) => g.id === this.accessories[i].groupId);
-      if (((foundIndex < 0) && (foundGroupIndex < 0)) || this.isDeviceExcluded(this.accessories[i].accessory.context.device)) {
+      if ((foundIndex < 0 && foundGroupIndex < 0) || this.isDeviceExcluded(this.accessories[i].accessory.context.device)) {
         // Not found or excluded; remove it.
         this.log.debug(`Removing accessory ${this.accessories[i].displayName} (${this.accessories[i].ieeeAddress})`);
         staleAccessories.push(this.accessories[i].accessory);
@@ -311,7 +454,7 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
   private handleReceivedDevices(devices: DeviceListEntry[]) {
     this.log.debug('Received devices...');
     this.didReceiveDevices = true;
-    devices.forEach(d => this.createOrUpdateAccessory(d));
+    devices.forEach((d) => this.createOrUpdateAccessory(d));
   }
 
   configureAccessory(accessory: PlatformAccessory) {
@@ -354,10 +497,17 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
 
   private mergeDeviceConfig(devConfig: DeviceConfiguration): BaseDeviceConfiguration {
     const result = { ...this.baseDeviceConfig, ...devConfig };
+
+    // Merge converter configs correctly
+    if (this.baseDeviceConfig.converters !== undefined && devConfig.converters !== undefined) {
+      result.converters = { ...this.baseDeviceConfig.converters, ...devConfig.converters };
+    }
+
     if (result.experimental !== undefined) {
       // Normalize experimental feature flags
       result.experimental = result.experimental.map((feature: string) => feature.trim().toLocaleUpperCase());
     }
+
     return result;
   }
 
@@ -375,7 +525,7 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
     if (this.config?.exclude_grouped_devices === true && this.lastReceivedGroups !== undefined) {
       const id = typeof device === 'string' ? device : device.ieee_address;
       for (const group of this.lastReceivedGroups) {
-        if (group.members.findIndex(m => m.ieee_address === id) >= 0) {
+        if (group.members.findIndex((m) => m.ieee_address === id) >= 0) {
           this.log.debug(`Device (${id}) is excluded because it is in a group: ${group.friendly_name} (${group.id})`);
           return true;
         }
@@ -387,8 +537,7 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
   private addAccessory(accessory: PlatformAccessory) {
     const ieee_address = accessory.context.device.ieee_address ?? accessory.context.device.ieeeAddr;
     if (this.isDeviceExcluded(accessory.context.device)) {
-      this.log.warn(
-        `Excluded device found on startup: ${accessory.context.device.friendly_name} (${ieee_address}).`);
+      this.log.warn(`Excluded device found on startup: ${accessory.context.device.friendly_name} (${ieee_address}).`);
       process.nextTick(() => {
         try {
           this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
@@ -401,8 +550,10 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
     }
 
     if (!isDeviceListEntry(accessory.context.device)) {
-      this.log.warn(`Restoring old (pre v1.0.0) accessory ${accessory.context.device.friendly_name} (${ieee_address}). This accessory ` +
-        `will not work until updated device information is received from Zigbee2MQTT v${Zigbee2mqttPlatform.MIN_Z2M_VERSION} or newer.`);
+      this.log.warn(
+        `Restoring old (pre v1.0.0) accessory ${accessory.context.device.friendly_name} (${ieee_address}). This accessory ` +
+          `will not work until updated device information is received from Zigbee2MQTT v${Zigbee2mqttPlatform.MIN_Z2M_VERSION} or newer.`
+      );
     }
 
     if (this.accessories.findIndex((acc) => acc.UUID === accessory.UUID) < 0) {
@@ -422,6 +573,7 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
     const existingAcc = this.accessories.find((acc) => acc.UUID === uuid);
     if (existingAcc) {
       existingAcc.updateDeviceInformation(device);
+      existingAcc.setAvailabilityEnabled(this.isAvailabilityEnabledForAddress(existingAcc));
     } else {
       // New entry
       this.log.info('New accessory:', device.friendly_name);
@@ -430,6 +582,7 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
       const acc = new Zigbee2mqttAccessory(this, accessory, this.getAdditionalConfigForDevice(device));
       this.accessories.push(acc);
+      acc.setAvailabilityEnabled(this.isAvailabilityEnabledForAddress(acc));
     }
   }
 
@@ -447,7 +600,7 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
         return;
       }
 
-      this.log.info(`Publish to '${topic}': '${payload}'`);
+      this.log.log((this.config?.log?.mqtt_publish ?? LogLevel.DEBUG) as LogLevel, `Publish to '${topic}': '${payload}'`);
 
       return new Promise<void>((resolve) => {
         this.mqttClient?.publish(topic, payload, options, () => resolve());
@@ -470,8 +623,13 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
     if (exposes.length === 0) {
       // No exposes found. Check if additional config is given.
       const config = this.getAdditionalConfigForDevice(group);
-      if (config !== undefined && (config.exclude === undefined || config.exclude === false)
-        && isDeviceConfiguration(config) && config.exposes !== undefined && config.exposes.length > 0) {
+      if (
+        config !== undefined &&
+        (config.exclude === undefined || config.exclude === false) &&
+        isDeviceConfiguration(config) &&
+        config.exposes !== undefined &&
+        config.exposes.length > 0
+      ) {
         // Additional config is given and it is not excluded.
         exposes = config.exposes;
       } else {
@@ -503,7 +661,7 @@ export class Zigbee2mqttPlatform implements DynamicPlatformPlugin {
     let exposes: ExposesEntry[] = [];
     let firstEntry = true;
     for (const member of group.members) {
-      const device = this.lastReceivedDevices.find((dev) => (dev.ieee_address === member.ieee_address));
+      const device = this.lastReceivedDevices.find((dev) => dev.ieee_address === member.ieee_address);
       if (device === undefined) {
         this.log.warn(`Cannot find group member in devices: ${member.ieee_address}`);
         continue;

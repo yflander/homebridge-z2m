@@ -1,6 +1,11 @@
 import { BasicAccessory, ServiceCreator, ServiceHandler } from './interfaces';
 import {
-  exposesCanBeGet, ExposesEntry, ExposesEntryWithProperty, exposesHasNumericProperty, exposesHasProperty, exposesIsPublished,
+  exposesCanBeGet,
+  ExposesEntry,
+  ExposesEntryWithProperty,
+  exposesHasNumericProperty,
+  exposesHasProperty,
+  exposesIsPublished,
 } from '../z2mModels';
 import { hap } from '../hap';
 import { copyExposesRangeToCharacteristic, getOrAddCharacteristic, groupByEndpoint } from '../helpers';
@@ -8,10 +13,16 @@ import { Characteristic, CharacteristicValue, Service, WithUUID } from 'homebrid
 
 export class AirQualitySensorCreator implements ServiceCreator {
   createServicesFromExposes(accessory: BasicAccessory, exposes: ExposesEntry[]): void {
-    const endpointMap = groupByEndpoint(exposes.filter(e =>
-      exposesHasProperty(e) && exposesIsPublished(e) && !accessory.isPropertyExcluded(e.property) &&
-      AirQualitySensorHandler.propertyFactories.find((f) => f.canUseExposesEntry(e)) !== undefined,
-    ).map(e => e as ExposesEntryWithProperty));
+    const endpointMap = groupByEndpoint(
+      exposes
+        .filter(
+          (e) =>
+            exposesHasProperty(e) &&
+            exposesIsPublished(e) &&
+            AirQualitySensorHandler.propertyFactories.find((f) => f.canUseExposesEntry(e)) !== undefined
+        )
+        .map((e) => e as ExposesEntryWithProperty)
+    );
     endpointMap.forEach((value, key) => {
       if (!accessory.isServiceHandlerIdKnown(AirQualitySensorHandler.generateIdentifier(key))) {
         this.createService(key, value, accessory);
@@ -24,8 +35,9 @@ export class AirQualitySensorCreator implements ServiceCreator {
       const handler = new AirQualitySensorHandler(endpoint, exposes, accessory);
       accessory.registerServiceHandler(handler);
     } catch (error) {
-      accessory.log.warn('Failed to setup Air Quality Sensor service ' +
-        `for accessory ${accessory.displayName} for endpoint ${endpoint}: ${error}`);
+      accessory.log.warn(
+        'Failed to setup Air Quality Sensor service ' + `for accessory ${accessory.displayName} for endpoint ${endpoint}: ${error}`
+      );
     }
   }
 }
@@ -43,8 +55,11 @@ interface AirQualityProperty {
 abstract class PassthroughAirQualityProperty implements AirQualityProperty {
   public latestAirQuality: number;
 
-  constructor(public expose: ExposesEntryWithProperty, protected service: Service,
-    protected characteristic: WithUUID<{ new(): Characteristic }>) {
+  constructor(
+    public expose: ExposesEntryWithProperty,
+    protected service: Service,
+    protected characteristic: WithUUID<{ new (): Characteristic }>
+  ) {
     this.latestAirQuality = hap.Characteristic.AirQuality.UNKNOWN;
     const c = getOrAddCharacteristic(service, characteristic);
     copyExposesRangeToCharacteristic(expose, c);
@@ -157,15 +172,14 @@ class ParticulateMatter2Dot5Property extends PassthroughAirQualityProperty {
 }
 
 class AirQualitySensorHandler implements ServiceHandler {
-  public static readonly propertyFactories:
-    WithExposesValidator<{ new(expose: ExposesEntryWithProperty, service: Service): AirQualityProperty }>[] = [
-      VolatileOrganicCompoundsProperty,
-      ParticulateMatter10Property,
-      ParticulateMatter2Dot5Property,
-    ];
+  public static readonly propertyFactories: WithExposesValidator<{
+    new (expose: ExposesEntryWithProperty, service: Service): AirQualityProperty;
+  }>[] = [VolatileOrganicCompoundsProperty, ParticulateMatter10Property, ParticulateMatter2Dot5Property];
 
   private readonly properties: AirQualityProperty[] = [];
   private readonly service: Service;
+
+  public mainCharacteristics: Characteristic[] = [];
 
   constructor(endpoint: string | undefined, exposes: ExposesEntryWithProperty[], private readonly accessory: BasicAccessory) {
     this.identifier = AirQualitySensorHandler.generateIdentifier(endpoint);
@@ -173,7 +187,7 @@ class AirQualitySensorHandler implements ServiceHandler {
     const serviceName = accessory.getDefaultServiceDisplayName(endpoint);
     accessory.log.debug(`Configuring Air Quality Sensor for ${serviceName}`);
     this.service = accessory.getOrAddService(new hap.Service.AirQualitySensor(serviceName, endpoint));
-    getOrAddCharacteristic(this.service, hap.Characteristic.AirQuality);
+    this.mainCharacteristics.push(getOrAddCharacteristic(this.service, hap.Characteristic.AirQuality));
 
     for (const e of exposes) {
       const factory = AirQualitySensorHandler.propertyFactories.find((f) => f.canUseExposesEntry(e));
@@ -210,7 +224,7 @@ class AirQualitySensorHandler implements ServiceHandler {
   }
 
   static getWorstAirQuality(a: number, b: number): number {
-    return (a > b) ? a : b;
+    return a > b ? a : b;
   }
 
   static generateIdentifier(endpoint: string | undefined) {

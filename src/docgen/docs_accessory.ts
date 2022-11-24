@@ -1,8 +1,9 @@
 import { Service } from 'homebridge';
-import { BasicAccessory, BasicLogger, ServiceHandler } from '../converters/interfaces';
+import { BasicAccessory, ServiceHandler } from '../converters/interfaces';
+import { BasicLogger } from '../logger';
 
 export class DocsAccessory implements BasicAccessory {
-  readonly log: BasicLogger = <BasicLogger><unknown>{
+  readonly log: BasicLogger = <BasicLogger>(<unknown>{
     info: function () {
       // stub
     },
@@ -15,13 +16,16 @@ export class DocsAccessory implements BasicAccessory {
     debug: function () {
       // stub
     },
-  };
+  });
 
   private readonly services: Service[] = [];
   private readonly handlerIds = new Set<string>();
 
-  constructor(
-    readonly displayName: string) { }
+  constructor(readonly displayName: string) {}
+
+  getConverterConfiguration(): unknown {
+    return {};
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   isExperimentalFeatureEnabled(feature: string): boolean {
@@ -39,10 +43,10 @@ export class DocsAccessory implements BasicAccessory {
   getServicesAndCharacteristics(): Map<string, string[]> {
     const result = new Map<string, string[]>();
     for (const srv of this.services) {
-      const characteristics = new Set<string>(srv.characteristics.map(c => c.UUID));
+      const characteristics = new Set<string>(srv.characteristics.map((c) => c.UUID));
       const existing = result.get(srv.UUID);
       if (existing !== undefined) {
-        existing.forEach(c => characteristics.add(c));
+        existing.forEach((c) => characteristics.add(c));
       }
       result.set(srv.UUID, [...characteristics]);
     }
@@ -50,9 +54,7 @@ export class DocsAccessory implements BasicAccessory {
   }
 
   getOrAddService(service: Service): Service {
-    const existingService = this.services.find(e =>
-      e.UUID === service.UUID && e.subtype === service.subtype,
-    );
+    const existingService = this.services.find((e) => e.UUID === service.UUID && e.subtype === service.subtype);
 
     if (existingService !== undefined) {
       return existingService;
@@ -70,16 +72,6 @@ export class DocsAccessory implements BasicAccessory {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   queueKeyForGetAction(key: string | string[]): void {
     // Do nothing
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  isPropertyExcluded(property: string | undefined): boolean {
-    return false;
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  isValueAllowedForProperty(property: string, value: string): boolean {
-    return true;
   }
 
   registerServiceHandler(handler: ServiceHandler): void {

@@ -1,13 +1,16 @@
 # Plugin configuration ⚙️
 The plugin can also be configured via the web interface provided by [Homebridge Config UI X](https://github.com/oznu/homebridge-config-ui-x#readme).
 
-A (rather minimal) configuration looks like this:
+A possible configuration looks like this:
 ```json
 {
    "platform": "zigbee2mqtt",
    "mqtt": {
       "base_topic": "zigbee2mqtt",
       "server": "mqtt://localhost:1883"
+   },
+   "log": {
+      "mqtt_publish": "debug"
    },
    "defaults": {
       "excluded_keys": [
@@ -34,14 +37,14 @@ A (rather minimal) configuration looks like this:
       },
       {
          "id": "0xabcd1234abcd1234",
-         "values": [
-            {
-                  "property": "action",
-                  "exclude": [
-                     "*_triple"
-                  ]
+         "excluded_endpoints": [
+            "l2"
+         ],
+         "converters": {
+            "switch": {
+               "type": "outlet"
             }
-         ]
+         }
       },
       {
          "id": "0x1234abcd1234abcd",
@@ -73,6 +76,13 @@ Within the `mqtt` object, you can add pretty much all the configuration options 
 * `keepalive`
 * `version`
 
+# Logging
+Within the `log` object, you can configure the logging level for certain parts of the plugin.
+The available log levels are `error`, `warn`, `info` and `debug`.
+
+Currently, the following can be configured:
+* `mqtt_publish`: The log level for MQTT messages that are published by the plugin. (default: `debug`)
+
 ### Disable QoS for published MQTT messages
 Some MQTT brokers do not have support for QoS. If the QoS Levels sent by this plugin are leading to problems, you can force the plugin to disable this for all messages (i.e. set the QoS level to 0) by setting the `disable_qos` to `true`.
 By default, this option is set to `false`. Note: this option does **not** exist in Zigbee2MQTT itself.
@@ -83,10 +93,13 @@ This identifier should be put in the `id` property.
 
 Currently the following options are available:
 * `exclude`: if set to `true` this device will not be fully ignored.
+* `ignore_availability`: If set to `true`, the availability information provided by Zigbee2MQTT for this device will be ignored by the plugin. This means the device will only show up as unavailable if Zigbee2MQTT is offline or the connection to the MQTT broker is lost.
 * `excluded_keys`: an array of properties/keys (known as the `property` in the exposes information) that should be ignored/excluded for this device.
 * `included_keys`: an array of properties/keys (known as the `property` in the exposes information) that should be included for this device, even if they are excluded in the global default device configuration (see below).
-* `values`: Per property, you can specify an include and/or exclude list to ignore certain values. The values may start or end with an asterisk (`*`) as a wildcard. This is currently only applied in the [Stateless Programmable Switch](action.md).
+* `excluded_endpoints`: an array of endpoints that should be ignored/excluded for this device. To ignore properties without an endpoint, add `''` (empty string) to the array.
+* `values`: Per property, you can specify an include and/or exclude list to ignore certain values. The values may start or end with an asterisk (`*`) as a wildcard.
 * `exposes`: An array of exposes information, using the [structures defined by Zigbee2MQTT](https://www.zigbee2mqtt.io/guide/usage/exposes.html).
+* `converters`: An object to optionally provide additional configuration for specific converters. More information can be found in the documentation of the [converters](converters.md), if applicable.
 
 ### Defaults
 Within the `defaults` property, you can also configure the device specific options mentioned above (except for the `id` and `included_keys`).

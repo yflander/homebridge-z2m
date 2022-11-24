@@ -1,5 +1,6 @@
 import { ExposesEntry } from '../z2mModels';
-import { BasicAccessory, ServiceCreator } from './interfaces';
+import { BasicAccessory, ConverterConfigurationRegistry, ServiceCreator } from './interfaces';
+import { BasicLogger } from '../logger';
 import { BasicSensorCreator } from './basic_sensors';
 import { BatteryCreator } from './battery';
 import { CoverCreator } from './cover';
@@ -10,16 +11,23 @@ import { StatelessProgrammableSwitchCreator } from './action';
 import { ThermostatCreator } from './climate';
 import { AirQualitySensorCreator } from './air_quality';
 import { GarageDoorOpenerCreator } from './garage_door';
+import { Logger } from 'homebridge';
 
 export interface ServiceCreatorManager {
   createHomeKitEntitiesFromExposes(accessory: BasicAccessory, exposes: ExposesEntry[]): void;
 }
 
-interface ServiceCreatorConstructor {
-  new(): ServiceCreator;
+export interface ConverterConfigValidatorCollection {
+  allConverterConfigurationsAreValid(configurations: object, logger: BasicLogger | undefined): boolean;
 }
 
-export class BasicServiceCreatorManager implements ServiceCreatorManager {
+interface ServiceCreatorConstructor {
+  new (converterConfigRegistry: ConverterConfigurationRegistry): ServiceCreator;
+}
+
+export class BasicServiceCreatorManager
+  implements ServiceCreatorManager, ConverterConfigValidatorCollection, ConverterConfigurationRegistry
+{
   private static readonly constructors: ServiceCreatorConstructor[] = [
     LightCreator,
     SwitchCreator,
@@ -37,8 +45,36 @@ export class BasicServiceCreatorManager implements ServiceCreatorManager {
 
   private creators: ServiceCreator[];
 
+  private converterConfigs: Map<string, (config: unknown, tag: string, logger: Logger | undefined) => boolean>;
+
   private constructor() {
-    this.creators = BasicServiceCreatorManager.constructors.map(c => new c());
+    this.converterConfigs = new Map();
+    this.creators = BasicServiceCreatorManager.constructors.map((c) => new c(this));
+  }
+
+  allConverterConfigurationsAreValid(configurations: object, logger: Logger | undefined): boolean {
+    for (const key of Object.keys(configurations)) {
+      const validator = this.converterConfigs.get(key);
+      if (validator !== undefined) {
+        if (!validator(configurations[key], key, logger)) {
+          logger?.error(`Converter configuration "${key}" is not valid. Contents: ${JSON.stringify(configurations[key])}`);
+          return false;
+        }
+      } else {
+        logger?.error(`Unknown converter configuration tag detected: ${key} Contents: ${JSON.stringify(configurations[key])}`);
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  registerConverterConfiguration(tag: string, validator: (config: unknown, tag: string, logger: Logger | undefined) => boolean): void {
+    tag = tag.trim().toLocaleLowerCase();
+    if (this.converterConfigs.has(tag)) {
+      throw new Error(`Duplicate converter configuration tag detected: ${tag}`);
+    }
+    this.converterConfigs.set(tag, validator);
   }
 
   public static getInstance(): BasicServiceCreatorManager {
